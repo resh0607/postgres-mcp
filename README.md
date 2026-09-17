@@ -135,6 +135,9 @@ You will now edit the `mcpServers` section of the configuration file.
         "run",
         "-i",
         "--rm",
+        "--attach=stdin",
+        "--attach=stdout",
+        "--attach=stderr",
         "-e",
         "DATABASE_URI",
         "crystaldba/postgres-mcp",
@@ -147,6 +150,11 @@ You will now edit the `mcpServers` section of the configuration file.
   }
 }
 ```
+
+The explicit attach options make Docker close the container's standard input
+when the MCP client disconnects. This allows the stdio server to shut down and
+`--rm` to remove the container instead of leaving it running after the client
+session ends.
 
 The Postgres MCP Pro Docker image will automatically remap the hostname `localhost` to work from inside of the container.
 

@@ -93,7 +93,57 @@ echo "Executing command:" >&2
 echo "${processed_args[@]}" >&2
 echo "----------------" >&2
 
-# Execute the command with the processed arguments
-# Use exec to replace the shell with the Python process, making it PID 1
-# This ensures signals (SIGTERM, SIGINT) are properly received
+# Docker keeps an interactive container's stdin open after its client
+# disconnects unless the container was created with StdinOnce. Once Docker
+# does deliver EOF, make sure the stdio server exits even if the MCP runtime is
+# still waiting internally. Non-stdio transports keep the direct exec path.
+is_stdio=false
+if [[ "${processed_args[0]}" == "postgres-mcp" ]]; then
+    is_stdio=true
+    for ((i = 1; i < ${#processed_args[@]}; i++)); do
+        case "${processed_args[i]}" in
+            --transport=sse|--transport=streamable-http)
+                is_stdio=false
+                ;;
+            --transport)
+                if ((i + 1 < ${#processed_args[@]})) && [[ "${processed_args[i + 1]}" != "stdio" ]]; then
+                    is_stdio=false
+                fi
+                ;;
+        esac
+    done
+fi
+
+if [[ "$is_stdio" == true ]]; then
+    runtime_dir=$(mktemp -d /tmp/postgres-mcp-stdio.XXXXXX)
+    input_fifo="$runtime_dir/stdin"
+    mkfifo "$input_fifo"
+
+    server_pid=""
+    relay_pid=""
+
+    cleanup_stdio() {
+        trap - EXIT HUP INT TERM
+        [[ -n "$relay_pid" ]] && kill "$relay_pid" >/dev/null 2>&1 || true
+        [[ -n "$server_pid" ]] && kill "$server_pid" >/dev/null 2>&1 || true
+        [[ -n "$relay_pid" ]] && wait "$relay_pid" >/dev/null 2>&1 || true
+        [[ -n "$server_pid" ]] && wait "$server_pid" >/dev/null 2>&1 || true
+        rm -f "$input_fifo"
+        rmdir "$runtime_dir" >/dev/null 2>&1 || true
+    }
+
+    trap cleanup_stdio EXIT HUP INT TERM
+
+    cat >"$input_fifo" &
+    relay_pid=$!
+    "${processed_args[@]}" <"$input_fifo" &
+    server_pid=$!
+
+    # Stop both sides when either the MCP process exits or Docker delivers EOF.
+    wait -n "$relay_pid" "$server_pid" || true
+    exit 0
+fi
+
+# SSE and streamable HTTP are long-running services and receive signals
+# directly as PID 1.
 exec "${processed_args[@]}"
